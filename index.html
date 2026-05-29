@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -6,7 +7,7 @@
 <title>Paid Social Creative Forecasting Tool — v2.0</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;900&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -862,7 +863,7 @@
       </div>
       <div id="batches-box" style="display:none;margin-top:10px;display:none;align-items:center;gap:10px;">
         <label style="font-size:12px;color:var(--text-secondary);">Number of delivery batches</label>
-        <input type="number" class="batches-input" id="batches-count" value="1" min="1" max="52" title="Number of delivery batches">
+        <input type="number" class="batches-input" id="batches-count" value="2" min="2" max="52" title="Number of delivery batches">
       </div>
     </div>
 
@@ -933,6 +934,9 @@
     if (el) el.innerHTML = '<span>' + name + '</span>';
     return name;
   }
+
+  var saveTimer = null;
+  var SAVE_KEY = 'paidSocialForecast_v2';
 
   function loadLogo(e) {
     const file = e.target.files[0];
@@ -1006,11 +1010,6 @@
 
   function onSigMultInput() {
     const mult = getSigMult();
-    // Restore pillar state
-    if (state.pillarsEnabled) pillarsEnabled = state.pillarsEnabled;
-    if (state.pillarsOpen) pillarsOpen = state.pillarsOpen;
-    if (state.pillarsState) pillarsState = state.pillarsState;
-
     if (anyPersonaCPAOverridden) {
       document.getElementById('median-spend').value = '';
     } else {
@@ -1045,7 +1044,7 @@
   var pillarsState = {};
   var pillarsOpen = {};
 
-  function getPersonaAssets(i) {
+  function getPersonaVariants(i) {
     const newSpend = getNewSpend();
     const days = getDays();
     const sigMult = getSigMult();
@@ -1055,8 +1054,11 @@
     const cpaEl = document.getElementById('cpa-' + i);
     const cpa = cpaEl ? (parseFloat(cpaEl.value) || 1) : 1;
     const monthlySignal = sigMult * cpa * days;
-    const varCeil = Math.max(1, Math.ceil(monthlySignal > 0 ? spend / monthlySignal : 0));
-    return varCeil * 2;
+    return Math.max(1, Math.ceil(monthlySignal > 0 ? spend / monthlySignal : 0));
+  }
+
+  function getPersonaAssets(i) {
+    return getPersonaVariants(i) * 2;
   }
 
   var pillarsEnabled = {};  // checkbox ticked
@@ -1064,11 +1066,9 @@
 
   function initPillarState(i) {
     if (!pillarsState[i]) {
-      var totalA = getPersonaAssets(i);
-      var half = Math.round(totalA * 0.5);
       pillarsState[i] = [
-        { name: 'Pillar 1', pct: 50, sv: 0, lv: 0, st: half, ca: 0 },
-        { name: 'Pillar 2', pct: 50, sv: 0, lv: 0, st: half, ca: 0 }
+        { name: 'Pillar 1', pct: 50, sv: 0, lv: 0, st: null, ca: 0 },
+        { name: 'Pillar 2', pct: 50, sv: 0, lv: 0, st: null, ca: 0 }
       ];
     }
   }
@@ -1121,17 +1121,64 @@
       '<td colspan="2">Messaging pillar</td>' +
       '<td>Weight %<span class="pillar-pct-warn" id="pillar-warn-' + i + '" style="color:var(--danger);font-size:10px;margin-left:6px;display:none;">&#8800; 100%</span></td>' +
       '<td colspan="2">Assets</td>' +
-      '<td colspan="5">Format split: no. of assets</td>';
+      '<td colspan="5">Format split: no. of variants</td>';
     sec.appendChild(hr);
 
+    // Pillar variants = floor(persona variants * pillarPct%), remainder to first pillar
+    var personaVariants = getPersonaVariants(i);
+    var pillarAssetsList = [];
+    var variantsList = [];
+
+    // Step 1: floor allocation
+    var allocated = 0;
+    pillars.forEach(function(p) {
+      var pVariants = Math.floor(personaVariants * (p.pct / 100));
+      variantsList.push(pVariants);
+      allocated += pVariants;
+    });
+
+    // Step 2: distribute remainder to pillars from top down
+    var remainder = personaVariants - allocated;
+    for (var r = 0; r < remainder; r++) {
+      variantsList[r % variantsList.length]++;
+    }
+
+    // Step 3: update p.pct to reflect actual split, correct last pillar for rounding drift
+    var totalPctUsed = 0;
     pillars.forEach(function(p, j) {
-      var pillarAssets = Math.round(totalAssets * (p.pct / 100));
-      var svA = p.sv !== undefined ? p.sv : 0;
-      var lvA = p.lv !== undefined ? p.lv : 0;
-      var stA = p.st !== undefined ? p.st : pillarAssets;
-      var caA = p.ca !== undefined ? p.ca : 0;
+      if (j === pillars.length - 1) {
+        // Give last pillar whatever is left to guarantee sum = 100
+        p.pct = parseFloat((100 - totalPctUsed).toFixed(1));
+      } else {
+        var actualPct = personaVariants > 0
+          ? parseFloat(((variantsList[j] / personaVariants) * 100).toFixed(1))
+          : 0;
+        p.pct = actualPct;
+        totalPctUsed += actualPct;
+      }
+      pillarAssetsList.push(variantsList[j] * 2);
+    });
+
+    // Always recalculate p.st when in default state (sv/lv/ca all zero)
+    // This ensures asset weighting stays correct when persona spend or CPA changes
+    pillars.forEach(function(p, j) {
+      if ((p.sv || 0) === 0 && (p.lv || 0) === 0 && (p.ca || 0) === 0) {
+        p.st = pillarAssetsList[j];
+      }
+    });
+
+    pillars.forEach(function(p, j) {
+      var pillarAssets = pillarAssetsList[j];
+      var pillarVariants = variantsList[j];
+      var svA = p.sv || 0;
+      var lvA = p.lv || 0;
+      var caA = p.ca || 0;
+      // Format inputs show VARIANTS not assets
+      // stA = remaining variants after sv/lv/ca
+      var stA = Math.max(0, pillarVariants - svA - lvA - caA);
+      p.st = stA; // keep state in sync
       var fmtTotal = svA + lvA + stA + caA;
-      var fmtValid = fmtTotal === pillarAssets;
+      var fmtValid = fmtTotal === pillarVariants;
 
       var tr = document.createElement('tr');
       tr.className = 'pillar-row';
@@ -1161,12 +1208,10 @@
         return function() {
           if (pillarsState[pi] && pillarsState[pi][pj]) {
             pillarsState[pi][pj].pct = parseFloat(this.value) || 0;
-            // Reset format to all-static on pillar weight change
-            var newAssets = Math.round(getPersonaAssets(pi) * (pillarsState[pi][pj].pct / 100));
-            pillarsState[pi][pj].sv = 0;
-            pillarsState[pi][pj].lv = 0;
-            pillarsState[pi][pj].st = newAssets;
-            pillarsState[pi][pj].ca = 0;
+            // Reset all pillars to null so renderPillars recalculates from weighted total
+            pillarsState[pi].forEach(function(pp) {
+              pp.sv = 0; pp.lv = 0; pp.st = null; pp.ca = 0;
+            });
             renderPillars(pi);
           }
         };
@@ -1179,7 +1224,7 @@
       tdAssets.colSpan = 2;
       var chip = document.createElement('span');
       chip.className = 'pillar-asset-chip';
-      chip.textContent = pillarAssets + ' assets';
+      chip.textContent = variantsList[j] + ' variants';
       tdAssets.appendChild(chip);
       tr.appendChild(tdAssets);
 
@@ -1239,9 +1284,9 @@
         icon.style.fontSize = '11px';
         var msg = document.createElement('span');
         if (fmtTotal > pillarAssets) {
-          msg.textContent = 'Format total (' + fmtTotal + ') exceeds pillar assets (' + pillarAssets + ')';
+          msg.textContent = 'Format total (' + fmtTotal + ') exceeds pillar variants (' + pillarVariants + ')';
         } else {
-          msg.textContent = 'Format total (' + fmtTotal + ') is less than pillar assets (' + pillarAssets + ')';
+          msg.textContent = 'Format total (' + fmtTotal + ') is less than pillar variants (' + pillarVariants + ')';
         }
         warnSpan.appendChild(icon);
         warnSpan.appendChild(msg);
@@ -1317,11 +1362,9 @@
     var total = pillars.reduce(function(s, p) { return s + p.pct; }, 0);
     var drift = parseFloat((100 - total).toFixed(4));
     if (drift !== 0) pillars[0].pct = parseFloat((pillars[0].pct + drift).toFixed(4));
-    // Reset static assets for each pillar based on new pct
-    var totalAssets = getPersonaAssets(i);
+    // Reset formats to default (null st = recalculate at render time)
     pillars.forEach(function(p) {
-      var pAssets = Math.round(totalAssets * (p.pct / 100));
-      p.sv = 0; p.lv = 0; p.st = pAssets; p.ca = 0;
+      p.sv = 0; p.lv = 0; p.st = null; p.ca = 0;
     });
   }
 
@@ -1740,62 +1783,201 @@
         fSheet.push([pd.name, 'Weight %', 'Variants to brief', 'Static', 'Short Video', 'Long Video', 'Carousel', 'Total assets (4x5 + 9x16)', 'Static (assets)', 'Short Video (assets)', 'Long Video (assets)', 'Carousel (assets)']);
         ps.forEach(function(p) {
           var pillarVariants = Math.round(pd.varCeil * (p.pct / 100));
-          var pillarAssets = Math.round(pd.assets * (p.pct / 100));
-          var stV = p.st > 0 ? Math.ceil(p.st / 2) : 0;
-          var svV = p.sv > 0 ? Math.ceil(p.sv / 2) : 0;
-          var lvV = p.lv > 0 ? Math.ceil(p.lv / 2) : 0;
-          var caV = p.ca > 0 ? Math.ceil(p.ca / 2) : 0;
-          fSheet.push([p.name, parseFloat(p.pct).toFixed(1) + '%', pillarVariants, stV, svV, lvV, caV, pillarAssets, p.st || 0, p.sv || 0, p.lv || 0, p.ca || 0]);
+          var pillarAssets = pillarVariants * 2;
+          // p.st/sv/lv/ca store VARIANTS — assets = variants * 2
+          var stV = p.st || 0;
+          var svV = p.sv || 0;
+          var lvV = p.lv || 0;
+          var caV = p.ca || 0;
+          fSheet.push([p.name, parseFloat(p.pct).toFixed(1) + '%', pillarVariants, stV, svV, lvV, caV, pillarAssets, stV * 2, svV * 2, lvV * 2, caV * 2]);
         });
       }
     }
 
     // ── Build Matrix Inputs sheet (only if batches enabled) ────────────
-    var mSheet = null;
-    var batchCount = batchesEnabled ? Math.max(1, parseInt(document.getElementById('batches-count').value) || 1) : 0;
+    // Matrix Inputs always generated — default 1 batch (all go to A) unless toggle on
+    var batchCount = (batchesEnabled && document.getElementById('batches-count'))
+      ? Math.max(1, parseInt(document.getElementById('batches-count').value) || 1)
+      : 1;
+    var batchLabels = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+    var mSheet = [];
+    mSheet.push(['Line', 'Batch', 'Group', 'Pillar', 'Ad Format', 'Variants to Brief', 'Total Assets (4x5 + 9x16)']);
+    var lineNum = 1;
+    var fmts = [
+      { key: 'st', label: 'Static' },
+      { key: 'sv', label: 'Short Video' },
+      { key: 'lv', label: 'Long Video' },
+      { key: 'ca', label: 'Carousel' }
+    ];
+    for (var i = 0; i < n; i++) {
+      if (!pillarsEnabled[i] || !pillarsState[i]) continue;
+      var gName = nameEls[i] ? nameEls[i].value : 'Group ' + (i+1);
 
-    if (batchesEnabled && batchCount > 1 && anyPillars) {
-      var batchLabels = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
-      mSheet = [];
-      mSheet.push(['Line', 'Batch', 'Group', 'Pillar', 'Ad Format', 'Asset Variations', 'Total Assets (4x5 + 9x16)']);
-      var lineNum = 1;
-      var fmts = [
-        { key: 'st', label: 'Static' },
-        { key: 'sv', label: 'Short Video' },
-        { key: 'lv', label: 'Long Video' },
-        { key: 'ca', label: 'Carousel' }
-      ];
-      for (var i = 0; i < n; i++) {
-        if (!pillarsEnabled[i] || !pillarsState[i]) continue;
-        var gName = nameEls[i] ? nameEls[i].value : 'Group ' + (i+1);
-        pillarsState[i].forEach(function(p) {
-          fmts.forEach(function(f) {
-            var fAssets = parseInt(p[f.key]) || 0;
-            if (fAssets === 0) return;
-            var assetsPerBatch = Math.round(fAssets / batchCount);
-            var variationsPerBatch = Math.ceil(assetsPerBatch / 2);
-            for (var b = 0; b < batchCount; b++) {
-              var bLabel = b < batchLabels.length ? batchLabels[b] : (b + 1);
-              mSheet.push([lineNum, bLabel, gName, p.name, f.label, variationsPerBatch, assetsPerBatch]);
-              lineNum++;
-            }
-          });
+      // Recompute persona variants fresh (same as getPersonaVariants)
+      var pPct = parseFloat((document.getElementById('pct-' + i) || {}).value) || 0;
+      var pSpend = newSpend * (pPct / 100);
+      var pCpa = parseFloat((document.getElementById('cpa-' + i) || {}).value) || 1;
+      var pMonthlySig = sigMult * pCpa * days;
+      var pVariants = Math.max(1, Math.ceil(pMonthlySig > 0 ? pSpend / pMonthlySig : 0));
+
+      var pillars = pillarsState[i];
+
+      // Recompute pillar variant counts using same floor+remainder logic as renderPillars
+      var pillarVariantsList = [];
+      var allocatedV = 0;
+      pillars.forEach(function(p) {
+        var pV = Math.floor(pVariants * (p.pct / 100));
+        pillarVariantsList.push(pV);
+        allocatedV += pV;
+      });
+      var remV = pVariants - allocatedV;
+      for (var r = 0; r < remV; r++) pillarVariantsList[r % pillarVariantsList.length]++;
+
+      pillars.forEach(function(p, j) {
+        var pillarVariants = pillarVariantsList[j];
+
+        // Recompute format variant splits: sv/lv/ca stored, st = remainder
+        var svV = p.sv || 0;
+        var lvV = p.lv || 0;
+        var caV = p.ca || 0;
+        var stV = Math.max(0, pillarVariants - svV - lvV - caV);
+
+        var formatVariants = [
+          { label: 'Static',      val: stV },
+          { label: 'Short Video', val: svV },
+          { label: 'Long Video',  val: lvV },
+          { label: 'Carousel',    val: caV }
+        ];
+
+        formatVariants.forEach(function(f) {
+          if (f.val === 0) return;
+          var variantsPerBatch = Math.floor(f.val / batchCount);
+          var remainder = f.val - (variantsPerBatch * batchCount);
+          for (var b = 0; b < batchCount; b++) {
+            var bLabel = b < batchLabels.length ? batchLabels[b] : (b + 1);
+            var bVariants = variantsPerBatch + (b < remainder ? 1 : 0);
+            mSheet.push([lineNum, bLabel, gName, p.name, f.label, bVariants, bVariants * 2]);
+            lineNum++;
+          }
         });
-      }
+      });
     }
 
-    // ── Write XLSX ─────────────────────────────────────────────────────
+    // ── Write XLSX with exact formatting from reference file ──────────
     var wb = XLSX.utils.book_new();
-    var ws1 = XLSX.utils.aoa_to_sheet(fSheet);
+
+    function cell(v, bold, bgRGB, alignH, fontColor) {
+      var s = {
+        font: { bold: !!bold, sz: 12, name: 'Calibri', color: { rgb: fontColor || '000000' } },
+        alignment: { horizontal: alignH || 'left', vertical: 'center' }
+      };
+      if (bgRGB) s.fill = { patternType: 'solid', fgColor: { rgb: bgRGB } };
+      return { v: (v === undefined || v === null) ? '' : v, t: typeof v === 'number' ? 'n' : 's', s: s };
+    }
+
+    // Exact colours from reference file
+    var BLUE       = '0000FF'; // summary label bg — brand blue
+    var GREEN_HDR  = '5FAA95'; // variants columns in pillar header
+    var ORANGE_HDR = 'F9936B'; // assets columns in pillar header
+    // Persona/pillar section header bg — same blue as table header
+    var SEC_HDR    = 'D9D9D9';
+
+    // ── Forecast sheet ─────────────────────────────────────────────────
+    var fSheetStyled = [];
+    fSheet.forEach(function(row, ri) {
+      if (!row || row.every(function(v){return v===''||v===undefined||v===null;})) {
+        fSheetStyled.push([cell('')]); return;
+      }
+      var isPlanHeader = ri < 11 && row[0] && (row[1] !== undefined && row[1] !== '');
+      var isGroupHeader = row[0] === 'Group';
+      // Pillar section header: persona name row with Weight % in col 1
+      var isPillarSecHdr = !isGroupHeader && row[1] === 'Weight %';
+      // Format columns header row — Static/Short Video etc cols have coloured bg
+      var styledRow = row.map(function(v, ci) {
+        if (isGroupHeader) {
+          return cell(v, true, 'D9D9D9', 'center');
+        } else if (isPlanHeader) {
+          if (ci === 0) return cell(v, true, BLUE, 'left', 'FFFFFF');
+          return cell(v, false, null, 'left', null);
+        } else if (isPillarSecHdr) {
+          // Col 0 = persona name (blue), col 1-2 = blue, col 3-6 = green (variants), col 7 = blue, col 8-11 = orange (assets)
+          if (ci <= 2) return cell(v, true, SEC_HDR, 'center');
+          if (ci >= 3 && ci <= 6) return cell(v, true, GREEN_HDR, 'center');
+          if (ci === 7) return cell(v, true, SEC_HDR, 'center');
+          if (ci >= 8) return cell(v, true, ORANGE_HDR, 'center');
+          return cell(v, true, SEC_HDR, 'center');
+        } else {
+          return cell(v, false, null, 'center');
+        }
+      });
+      fSheetStyled.push(styledRow);
+    });
+
+    var ws1 = XLSX.utils.aoa_to_sheet(fSheetStyled);
+    ws1['!cols'] = [
+      {wch:23.5},{wch:13},{wch:13},{wch:19},{wch:14},{wch:16},
+      {wch:18},{wch:22},{wch:16},{wch:20},{wch:20},{wch:18}
+    ];
+    ws1['!rows'] = fSheetStyled.map(function(){return {hpt:15.5};});
+    ws1['!sheetView'] = [{ showGridLines: false }];
     XLSX.utils.book_append_sheet(wb, ws1, 'Forecast');
-    if (mSheet) {
-      var ws2 = XLSX.utils.aoa_to_sheet(mSheet);
+
+    // ── Matrix Inputs sheet ────────────────────────────────────────────
+    if (mSheet && mSheet.length > 1) {
+      var mStyled = mSheet.map(function(row, ri) {
+        return row.map(function(v) {
+          return cell(v, false, null, 'left');
+        });
+      });
+      var ws2 = XLSX.utils.aoa_to_sheet(mStyled);
+      ws2['!cols'] = [
+        {wch:4.16},{wch:5.41},{wch:10.75},{wch:6.33},
+        {wch:10.41},{wch:14.08},{wch:20.75}
+      ];
+      ws2['!rows'] = mStyled.map(function(){return {hpt:15.5};});
+      ws2['!sheetView'] = [{ showGridLines: false }];
       XLSX.utils.book_append_sheet(wb, ws2, 'Matrix Inputs');
     }
+
     XLSX.writeFile(wb, fname);
   }
 
-  function applyStateSnapshot(state) {
+  function getStateSnapshot() {
+    var n = getPersonaCount();
+    var personaData = [];
+    var nameEls = document.querySelectorAll('.name-input');
+    for (var i = 0; i < n; i++) {
+      personaData.push({
+        name: nameEls[i] ? nameEls[i].value : 'Persona ' + (i + 1),
+        pct: (document.getElementById('pct-' + i) || {}).value || '',
+        cpa: (document.getElementById('cpa-' + i) || {}).value || '',
+        cpaOverridden: cpaOverridden[i] || false
+      });
+    }
+    var savedPillarsEnabled = {}, savedPillarsOpen = {}, savedPillarsState = {};
+    for (var k = 0; k < n; k++) {
+      savedPillarsEnabled[k] = pillarsEnabled[k] || false;
+      savedPillarsOpen[k] = pillarsOpen[k] || false;
+      savedPillarsState[k] = pillarsState[k] || null;
+    }
+    return {
+      budget: document.getElementById('budget').value,
+      newPct: document.getElementById('new-pct').value,
+      cpaGlobal: document.getElementById('cpa-global').value,
+      personas: document.getElementById('personas').value,
+      currency: document.getElementById('currency').value,
+      month: document.getElementById('month-sel').value,
+      medianSpend: document.getElementById('median-spend').value,
+      sigMult: document.getElementById('sig-mult').value,
+      anyPersonaCPAOverridden: anyPersonaCPAOverridden,
+      personaData: personaData,
+      pillarsEnabled: savedPillarsEnabled,
+      pillarsOpen: savedPillarsOpen,
+      pillarsState: savedPillarsState
+    };
+  }
+
+    function applyStateSnapshot(state) {
     if (!state) return;
     document.getElementById('budget').value = state.budget || '';
     document.getElementById('new-pct').value = state.newPct || '';
