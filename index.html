@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1206,14 +1205,58 @@
       pctInput.min = 0; pctInput.max = 100; pctInput.step = 1;
       pctInput.addEventListener('input', (function(pi, pj) {
         return function() {
+          // Just store the value while typing — don't re-render yet
           if (pillarsState[pi] && pillarsState[pi][pj]) {
             pillarsState[pi][pj].pct = parseFloat(this.value) || 0;
-            // Reset all pillars to null so renderPillars recalculates from weighted total
-            pillarsState[pi].forEach(function(pp) {
-              pp.sv = 0; pp.lv = 0; pp.st = null; pp.ca = 0;
-            });
-            renderPillars(pi);
           }
+        };
+      })(i, j));
+      pctInput.addEventListener('blur', (function(pi, pj) {
+        return function() {
+          if (!pillarsState[pi]) return;
+          var newVal = parseFloat(this.value) || 0;
+          newVal = Math.min(100, Math.max(0, newVal));
+          pillarsState[pi][pj].pct = newVal;
+
+          // Redistribute remaining % proportionally among other pillars
+          var others = pillarsState[pi].filter(function(_, idx) { return idx !== pj; });
+          var otherTotal = others.reduce(function(s, p) { return s + (p.pct || 0); }, 0);
+          var remaining = 100 - newVal;
+
+          if (others.length === 1) {
+            // Only one other — give it everything remaining
+            others[0].pct = parseFloat(remaining.toFixed(1));
+          } else if (otherTotal > 0) {
+            // Scale others proportionally
+            var usedPct = 0;
+            others.forEach(function(p, idx) {
+              if (idx === others.length - 1) {
+                p.pct = parseFloat((remaining - usedPct).toFixed(1));
+              } else {
+                var share = parseFloat(((p.pct / otherTotal) * remaining).toFixed(1));
+                p.pct = share;
+                usedPct += share;
+              }
+            });
+          } else {
+            // All others were 0 — split equally
+            var equal = parseFloat((remaining / others.length).toFixed(1));
+            var usedPct2 = 0;
+            others.forEach(function(p, idx) {
+              if (idx === others.length - 1) {
+                p.pct = parseFloat((remaining - usedPct2).toFixed(1));
+              } else {
+                p.pct = equal;
+                usedPct2 += equal;
+              }
+            });
+          }
+
+          // Reset all format splits to recalculate from new weightings
+          pillarsState[pi].forEach(function(pp) {
+            pp.sv = 0; pp.lv = 0; pp.st = null; pp.ca = 0;
+          });
+          renderPillars(pi);
         };
       })(i, j));
       tdPct.appendChild(pctInput);
